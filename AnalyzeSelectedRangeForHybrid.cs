@@ -26,10 +26,11 @@ public class EntryPoint
         string projectBase = Path.GetFileNameWithoutExtension(projectPath);
         string settingsPath = Path.Combine(projectDir, projectBase + "-hybrid-settings.txt");
         string userSettingsPath = GetUserSettingsPath(projectBase);
-        string defaultOutputDir = LoadLastOutputDirectory(settingsPath, userSettingsPath, projectDir);
-        string defaultTempDir = LoadLastTempDirectory(settingsPath, userSettingsPath, defaultOutputDir);
-        string lastVideoTemplate = LoadSettingValue(settingsPath, userSettingsPath, "VideoTemplate");
-        string lastAudioTemplate = LoadSettingValue(settingsPath, userSettingsPath, "AudioTemplate");
+        string sharedSettingsPath = GetSharedSettingsPath();
+        string defaultOutputDir = LoadLastOutputDirectory(settingsPath, userSettingsPath, sharedSettingsPath, projectDir);
+        string defaultTempDir = LoadLastTempDirectory(settingsPath, userSettingsPath, sharedSettingsPath, defaultOutputDir);
+        string lastVideoTemplate = LoadSettingValue(settingsPath, userSettingsPath, sharedSettingsPath, "VideoTemplate");
+        string lastAudioTemplate = LoadSettingValue(settingsPath, userSettingsPath, sharedSettingsPath, "AudioTemplate");
 
         double fps = vegas.Project.Video.FrameRate;
         List<VideoEventInfo> events = CollectVideoEvents(vegas, startFrame, endFrame);
@@ -47,7 +48,7 @@ public class EntryPoint
         string outputDir = run.OutputDirectory;
         Directory.CreateDirectory(tempRootDir);
         Directory.CreateDirectory(outputDir);
-        SaveSettings(settingsPath, userSettingsPath, tempRootDir, outputDir, run.VideoTemplateKey, run.AudioTemplateKey);
+        SaveSettings(settingsPath, userSettingsPath, sharedSettingsPath, tempRootDir, outputDir, run.VideoTemplateKey, run.AudioTemplateKey);
 
         string outDir = Path.Combine(tempRootDir, projectBase + "-hybrid-range-" + startFrame + "-" + endFrame);
         bool resumeRun = Directory.Exists(outDir);
@@ -1521,6 +1522,12 @@ public class EntryPoint
         return false;
     }
 
+    private string GetSharedSettingsPath()
+    {
+        return Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
+            "VegasFfmpegHybridRender", "last-used.ini");
+    }
+
     private string GetUserSettingsPath(string projectBase)
     {
         string root = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "VegasFfmpegHybridRender");
@@ -1551,33 +1558,36 @@ public class EntryPoint
         return result.Length == 0 ? "project" : result.ToString();
     }
 
-    private string LoadLastOutputDirectory(string projectSettingsPath, string userSettingsPath, string fallback)
+    private string LoadLastOutputDirectory(string projectSettingsPath, string userSettingsPath, string sharedSettingsPath, string fallback)
     {
-        string saved = LoadSettingValue(projectSettingsPath, userSettingsPath, "OutputDirectory");
+        string saved = LoadSettingValue(projectSettingsPath, userSettingsPath, sharedSettingsPath, "OutputDirectory");
         if (!String.IsNullOrEmpty(saved))
             return saved;
         return Directory.Exists(fallback) ? fallback : Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments);
     }
 
-    private string LoadLastTempDirectory(string projectSettingsPath, string userSettingsPath, string fallback)
+    private string LoadLastTempDirectory(string projectSettingsPath, string userSettingsPath, string sharedSettingsPath, string fallback)
     {
-        string saved = LoadSettingValue(projectSettingsPath, userSettingsPath, "TempDirectory");
+        string saved = LoadSettingValue(projectSettingsPath, userSettingsPath, sharedSettingsPath, "TempDirectory");
         if (!String.IsNullOrEmpty(saved))
             return saved;
 
-        saved = LoadSettingValue(projectSettingsPath, userSettingsPath, "OutputDirectory");
+        saved = LoadSettingValue(projectSettingsPath, userSettingsPath, sharedSettingsPath, "OutputDirectory");
         if (!String.IsNullOrEmpty(saved))
             return saved;
 
         return Directory.Exists(fallback) ? fallback : Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments);
     }
 
-    private string LoadSettingValue(string projectSettingsPath, string userSettingsPath, string key)
+    private string LoadSettingValue(string projectSettingsPath, string userSettingsPath, string sharedSettingsPath, string key)
     {
         string value = LoadSettingValue(projectSettingsPath, key);
         if (!String.IsNullOrEmpty(value))
             return value;
-        return LoadSettingValue(userSettingsPath, key);
+        value = LoadSettingValue(userSettingsPath, key);
+        if (!String.IsNullOrEmpty(value))
+            return value;
+        return LoadSettingValue(sharedSettingsPath, key);
     }
 
     private string LoadSettingValue(string settingsPath, string key)
@@ -1601,10 +1611,11 @@ public class EntryPoint
         return "";
     }
 
-    private void SaveSettings(string projectSettingsPath, string userSettingsPath, string tempDirectory, string outputDirectory, string videoTemplateKey, string audioTemplateKey)
+    private void SaveSettings(string projectSettingsPath, string userSettingsPath, string sharedSettingsPath, string tempDirectory, string outputDirectory, string videoTemplateKey, string audioTemplateKey)
     {
         SaveSettingsFile(projectSettingsPath, tempDirectory, outputDirectory, videoTemplateKey, audioTemplateKey);
         SaveSettingsFile(userSettingsPath, tempDirectory, outputDirectory, videoTemplateKey, audioTemplateKey);
+        SaveSettingsFile(sharedSettingsPath, tempDirectory, outputDirectory, videoTemplateKey, audioTemplateKey);
     }
 
     private void SaveSettingsFile(string settingsPath, string tempDirectory, string outputDirectory, string videoTemplateKey, string audioTemplateKey)
