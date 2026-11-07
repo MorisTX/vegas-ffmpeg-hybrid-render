@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.Globalization;
 using System.Diagnostics;
@@ -25,9 +25,11 @@ public class EntryPoint
         long endFrame = startFrame + lengthFrames;
         string projectBase = Path.GetFileNameWithoutExtension(projectPath);
         string settingsPath = Path.Combine(projectDir, projectBase + "-hybrid-settings.txt");
-        string defaultRootDir = LoadLastOutputDirectory(settingsPath, projectDir);
-        string lastVideoTemplate = LoadSettingValue(settingsPath, "VideoTemplate");
-        string lastAudioTemplate = LoadSettingValue(settingsPath, "AudioTemplate");
+        string userSettingsPath = GetUserSettingsPath(projectBase);
+        string defaultOutputDir = LoadLastOutputDirectory(settingsPath, userSettingsPath, projectDir);
+        string defaultTempDir = LoadLastTempDirectory(settingsPath, userSettingsPath, defaultOutputDir);
+        string lastVideoTemplate = LoadSettingValue(settingsPath, userSettingsPath, "VideoTemplate");
+        string lastAudioTemplate = LoadSettingValue(settingsPath, userSettingsPath, "AudioTemplate");
 
         double fps = vegas.Project.Video.FrameRate;
         List<VideoEventInfo> events = CollectVideoEvents(vegas, startFrame, endFrame);
@@ -35,27 +37,29 @@ public class EntryPoint
         complex = MergeRanges(complex);
         complex = PreserveUncopyableTimelineRanges(events, complex, startFrame, endFrame);
         List<SimpleSegment> previewSimple = BuildSimpleSegments(events, complex, startFrame, endFrame, fps,
-            Path.Combine(defaultRootDir, projectBase + "-hybrid-range-" + startFrame + "-" + endFrame));
+            Path.Combine(defaultTempDir, projectBase + "-hybrid-range-" + startFrame + "-" + endFrame));
 
-        RunSelection run = ShowSetupWindow(vegas, defaultRootDir, lastVideoTemplate, lastAudioTemplate, projectBase, startFrame, endFrame, fps, complex, previewSimple);
+        RunSelection run = ShowSetupWindow(vegas, defaultTempDir, defaultOutputDir, lastVideoTemplate, lastAudioTemplate, projectBase, startFrame, endFrame, fps, complex, previewSimple);
         if (run == null)
             return;
 
-        string rootDir = run.OutputDirectory;
-        Directory.CreateDirectory(rootDir);
-        SaveSettings(settingsPath, rootDir, run.VideoTemplateKey, run.AudioTemplateKey);
+        string tempRootDir = run.TempDirectory;
+        string outputDir = run.OutputDirectory;
+        Directory.CreateDirectory(tempRootDir);
+        Directory.CreateDirectory(outputDir);
+        SaveSettings(settingsPath, userSettingsPath, tempRootDir, outputDir, run.VideoTemplateKey, run.AudioTemplateKey);
 
-        string outDir = Path.Combine(rootDir, projectBase + "-hybrid-range-" + startFrame + "-" + endFrame);
+        string outDir = Path.Combine(tempRootDir, projectBase + "-hybrid-range-" + startFrame + "-" + endFrame);
         bool resumeRun = Directory.Exists(outDir);
         Directory.CreateDirectory(outDir);
 
         List<SimpleSegment> simple = BuildSimpleSegments(events, complex, startFrame, endFrame, fps, outDir);
-        string finalFile = MakeFinalPath(rootDir, projectBase, startFrame, endFrame, resumeRun);
+        string finalFile = MakeFinalPath(outputDir, projectBase, startFrame, endFrame, resumeRun);
 
         string complexCsv = Path.Combine(outDir, "vegas-complex-ranges.csv");
         string simpleCsv = Path.Combine(outDir, "ffmpeg-simple-segments.csv");
         string vegasRanges = Path.Combine(outDir, "vegas-ranges.txt");
-        string workConfig = Path.Combine(rootDir, projectBase + "-hybrid-workdir.txt");
+        string workConfig = Path.Combine(tempRootDir, projectBase + "-hybrid-workdir.txt");
         string projectWorkConfig = Path.Combine(projectDir, projectBase + "-hybrid-workdir.txt");
         string ffmpegScript = Path.Combine(outDir, "render-simple-segments.ps1");
         string assembleScript = Path.Combine(outDir, "assemble-video-copy.ps1");
@@ -75,21 +79,21 @@ public class EntryPoint
         WriteMuxScript(muxScript, outDir, audioFile, finalFile, expectedDurationSeconds);
         WriteSummary(summaryPath, startFrame, endFrame, fps, complex, simple, complexCsv, simpleCsv, vegasRanges, workConfig, ffmpegScript, assembleScript, audioFile, muxScript, finalFile);
 
-        ExecuteFullPipeline(vegas, run, outDir, rootDir, fps, complex, simple, startFrame, endFrame, ffmpegScript, assembleScript, audioFile, muxScript, finalFile);
+        ExecuteFullPipeline(vegas, run, outDir, tempRootDir, outputDir, fps, complex, simple, startFrame, endFrame, ffmpegScript, assembleScript, audioFile, muxScript, finalFile);
     }
 
     private string ChooseWorkDirectory(string initialDir)
     {
         using (FolderBrowserDialog dialog = new FolderBrowserDialog())
         {
-            dialog.Description = "Choose a work/output directory for all hybrid render files";
+            dialog.Description = "Choose a folder";
             dialog.SelectedPath = Directory.Exists(initialDir) ? initialDir : Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments);
             dialog.ShowNewFolderButton = true;
             return dialog.ShowDialog() == DialogResult.OK ? dialog.SelectedPath : null;
         }
     }
 
-    private RunSelection ShowSetupWindow(Vegas vegas, string defaultRootDir, string lastVideoTemplate, string lastAudioTemplate, string projectBase, long startFrame, long endFrame, double fps,
+    private RunSelection ShowSetupWindow(Vegas vegas, string defaultTempDir, string defaultOutputDir, string lastVideoTemplate, string lastAudioTemplate, string projectBase, long startFrame, long endFrame, double fps,
         List<Range> complex, List<SimpleSegment> simple)
     {
         List<RenderChoice> videoChoices = BuildVideoRenderChoices(vegas);
@@ -105,7 +109,7 @@ public class EntryPoint
         form.Text = "Hybrid render";
         form.StartPosition = FormStartPosition.CenterScreen;
         form.Width = 860;
-        form.Height = 520;
+        form.Height = 660;
         form.MinimizeBox = false;
         form.MaximizeBox = false;
         form.FormBorderStyle = FormBorderStyle.FixedDialog;
@@ -164,33 +168,69 @@ public class EntryPoint
         };
         form.Controls.Add(audioCombo);
 
-        Label folderLabel = DarkLabel("Output folder", 24, 286, 220, 22);
-        form.Controls.Add(folderLabel);
+        Label tempFolderLabel = DarkLabel("Temporary files folder", 24, 286, 220, 22);
+        form.Controls.Add(tempFolderLabel);
 
-        TextBox folderText = DarkTextBox(24, 310, 724, 28);
-        folderText.Text = defaultRootDir;
-        form.Controls.Add(folderText);
+        TextBox tempFolderText = DarkTextBox(24, 310, 724, 28);
+        tempFolderText.Text = defaultTempDir;
+        form.Controls.Add(tempFolderText);
 
-        Button browse = DarkButton("...", 758, 308, 66, 30, false);
-        browse.Click += delegate(object sender, EventArgs e)
+        Button browseTemp = DarkButton("...", 758, 308, 66, 30, false);
+        browseTemp.Click += delegate(object sender, EventArgs e)
         {
-            string chosen = ChooseWorkDirectory(Directory.Exists(folderText.Text) ? folderText.Text : defaultRootDir);
+            string chosen = ChooseWorkDirectory(Directory.Exists(tempFolderText.Text) ? tempFolderText.Text : defaultTempDir);
             if (!String.IsNullOrEmpty(chosen))
-                folderText.Text = chosen;
+                tempFolderText.Text = chosen;
         };
-        form.Controls.Add(browse);
+        form.Controls.Add(browseTemp);
 
-        Label note = DarkLabel("Final MP4 will be saved directly into this folder. Temporary project folder is kept after render to avoid post-render UI freezes.", 24, 360, 800, 22);
+        Label outputFolderLabel = DarkLabel("Final output folder", 24, 352, 220, 22);
+        form.Controls.Add(outputFolderLabel);
+
+        TextBox outputFolderText = DarkTextBox(24, 376, 724, 28);
+        outputFolderText.Text = defaultOutputDir;
+        form.Controls.Add(outputFolderText);
+
+        Button browseOutput = DarkButton("...", 758, 374, 66, 30, false);
+        browseOutput.Click += delegate(object sender, EventArgs e)
+        {
+            string chosen = ChooseWorkDirectory(Directory.Exists(outputFolderText.Text) ? outputFolderText.Text : defaultOutputDir);
+            if (!String.IsNullOrEmpty(chosen))
+                outputFolderText.Text = chosen;
+        };
+        form.Controls.Add(browseOutput);
+
+        Label stageLabel = DarkLabel("Start stage", 24, 418, 220, 22);
+        form.Controls.Add(stageLabel);
+
+        ComboBox stageCombo = DarkCombo(24, 442, 800, 28);
+        stageCombo.Items.Add(new StageChoice(-1, "Auto / continue from detected outputs"));
+        stageCombo.Items.Add(new StageChoice(0, "1. VEGAS complex ranges"));
+        stageCombo.Items.Add(new StageChoice(1, "2. FFmpeg simple ranges"));
+        stageCombo.Items.Add(new StageChoice(2, "3. Assemble video"));
+        stageCombo.Items.Add(new StageChoice(3, "4. Render audio WAV"));
+        stageCombo.Items.Add(new StageChoice(4, "5. Mux final MP4"));
+        stageCombo.Items.Add(new StageChoice(5, "6. Validate final MP4"));
+        stageCombo.SelectedIndex = 0;
+        form.Controls.Add(stageCombo);
+
+        Label note = DarkLabel("Temporary files go into the temporary folder. Final MP4 and copied log go into the final output folder.", 24, 484, 800, 22);
         note.ForeColor = ColorFromRgb(170, 170, 170);
         form.Controls.Add(note);
 
-        Button execute = DarkButton("Выполнить", 624, 404, 200, 42, true);
+        Button execute = DarkButton("Run", 624, 526, 200, 42, true);
         execute.Click += delegate(object sender, EventArgs e)
         {
-            string folder = folderText.Text.Trim();
-            if (folder.Length == 0)
+            string tempFolder = tempFolderText.Text.Trim();
+            string outputFolder = outputFolderText.Text.Trim();
+            if (tempFolder.Length == 0)
             {
-                MessageBox.Show("Choose an output folder.", "Hybrid render", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                MessageBox.Show("Choose a temporary files folder.", "Hybrid render", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                return;
+            }
+            if (outputFolder.Length == 0)
+            {
+                MessageBox.Show("Choose a final output folder.", "Hybrid render", MessageBoxButtons.OK, MessageBoxIcon.Warning);
                 return;
             }
             if (videoCombo.SelectedItem == null || audioCombo.SelectedItem == null)
@@ -201,15 +241,20 @@ public class EntryPoint
 
             try
             {
-                Directory.CreateDirectory(folder);
+                Directory.CreateDirectory(tempFolder);
+                Directory.CreateDirectory(outputFolder);
             }
             catch (Exception ex)
             {
-                MessageBox.Show(ex.Message, "Output folder", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                MessageBox.Show(ex.Message, "Render folders", MessageBoxButtons.OK, MessageBoxIcon.Error);
                 return;
             }
 
-            result = new RunSelection(folder, (RenderChoice)videoCombo.SelectedItem, (RenderChoice)audioCombo.SelectedItem);
+            StageChoice stageChoice = stageCombo.SelectedItem as StageChoice;
+            if (stageChoice == null)
+                stageChoice = new StageChoice(-1, "Auto / continue from detected outputs");
+
+            result = new RunSelection(tempFolder, outputFolder, (RenderChoice)videoCombo.SelectedItem, (RenderChoice)audioCombo.SelectedItem, stageChoice.StepIndex);
             form.DialogResult = DialogResult.OK;
             form.Close();
         };
@@ -221,15 +266,26 @@ public class EntryPoint
         return result;
     }
 
-    private void ExecuteFullPipeline(Vegas vegas, RunSelection run, string outDir, string rootDir, double fps, List<Range> complex, List<SimpleSegment> simple,
+    private void ExecuteFullPipeline(Vegas vegas, RunSelection run, string outDir, string tempRootDir, string outputDir, double fps, List<Range> complex, List<SimpleSegment> simple,
         long startFrame, long endFrame, string ffmpegScript, string assembleScript, string audioFile, string muxScript, string finalFile)
     {
         string logPath = Path.Combine(outDir, "hybrid-render.log");
         string statePath = Path.Combine(outDir, "hybrid-render-state.txt");
-        string finalLogPath = Path.Combine(rootDir, Path.GetFileNameWithoutExtension(finalFile) + ".log.txt");
+        string finalLogPath = Path.Combine(outputDir, Path.GetFileNameWithoutExtension(finalFile) + ".log.txt");
         string videoOnlyFile = Path.Combine(outDir, "hybrid_video_only.mp4");
         double expectedDurationSeconds = ((double)(endFrame - startFrame)) / fps;
-        PipelineStep[] steps = BuildPipelineSteps(outDir, complex, simple, videoOnlyFile, audioFile, finalFile, fps, expectedDurationSeconds);
+        string redirectState = Path.Combine(outDir, "hybrid-video-location.txt");
+        if (File.Exists(redirectState))
+        {
+            string recorded = File.ReadAllText(redirectState).Trim();
+            if (Path.IsPathRooted(recorded) && File.Exists(recorded))
+                videoOnlyFile = recorded;
+        }
+        PipelineStep[] steps = BuildPipelineSteps(outDir, complex, simple,
+            delegate { return videoOnlyFile; }, audioFile, delegate { return finalFile; }, fps, expectedDurationSeconds);
+        int selectedStartStepIndex = run.StartStepIndex;
+        if (selectedStartStepIndex < -1 || selectedStartStepIndex >= steps.Length)
+            selectedStartStepIndex = -1;
         int totalFragments = complex.Count + simple.Count;
 
         Form form = new Form();
@@ -296,11 +352,20 @@ public class EntryPoint
         form.Shown += delegate(object sender, EventArgs e)
         {
             bool success = false;
-            Stopwatch totalWatch = Stopwatch.StartNew();
+            PipelineElapsed totalWatch = new PipelineElapsed(Path.Combine(outDir, "hybrid-elapsed-ticks.txt"));
+            var timerRefresh = new System.Windows.Forms.Timer();
+            timerRefresh.Interval = 1000;
             double estimatedTotal = EstimateTotalSeconds(startFrame, endFrame, fps, complex, simple);
+            timerRefresh.Tick += delegate { UpdateTimerLabel(timer, totalWatch.Elapsed, estimatedTotal); };
+            timerRefresh.Start();
+            UpdateTimerLabel(timer, totalWatch.Elapsed, estimatedTotal);
             try
             {
                 AppendProgress(log, logPath, "Log: " + logPath);
+                if (totalWatch.Previous > TimeSpan.Zero)
+                    AppendProgress(log, logPath, "Resuming accumulated elapsed time: " + FormatDuration(totalWatch.Previous));
+                AppendProgress(log, logPath, "Final output folder: " + outputDir);
+                AppendProgress(log, logPath, "Temporary root folder: " + tempRootDir);
                 AppendProgress(log, logPath, "Final MP4: " + finalFile);
                 AppendProgress(log, logPath, "Work folder: " + outDir);
                 AppendProgress(log, logPath, "Selection: frames " +
@@ -312,52 +377,120 @@ public class EntryPoint
                     complex.Count.ToString(CultureInfo.InvariantCulture) + " VEGAS range(s), " +
                     simple.Count.ToString(CultureInfo.InvariantCulture) + " FFmpeg simple segment(s), " +
                     BuildOrderedParts(simple, complex, Path.Combine(outDir, "vegas-parts")).Count.ToString(CultureInfo.InvariantCulture) + " video part(s)");
-                AppendProgress(log, logPath, "Video template: " + run.VideoTemplateKey);
-                AppendProgress(log, logPath, "Audio template: " + run.AudioTemplateKey);
+                AppendProgress(log, logPath, "Video template: " + run.VideoTemplateDisplay);
+                AppendProgress(log, logPath, "Audio template: " + run.AudioTemplateDisplay);
+                AppendProgress(log, logPath, "Start stage: " + PipelineStageName(selectedStartStepIndex));
+                if (selectedStartStepIndex >= 0)
+                    AppendProgress(log, logPath, "Previous stages will be validated and reused. Selected and later stages will run again.");
                 AppendProgress(log, logPath, "Duration tolerance: +/- " + Num(DurationToleranceSeconds(fps)) + " sec");
                 VerifyFfprobeAvailable(log, logPath);
                 SetFragmentProgress(fragmentProgress, 0);
 
-                RunPipelineStep(steps[0], log, logPath, statePath, timer, totalWatch, estimatedTotal, overall, current, 0, steps.Length, delegate()
+                RunPipelineStep(steps[0], log, logPath, statePath, timer, totalWatch, estimatedTotal, overall, current, 0, steps.Length, selectedStartStepIndex, delegate()
                 {
                     RenderVegasPartsWithTemplate(vegas, complex, outDir, fps, run.VideoTemplate, log, logPath, steps[0], current, fragmentProgress);
                 });
                 SetFragmentProgress(fragmentProgress, complex.Count);
-                RunPipelineStep(steps[1], log, logPath, statePath, timer, totalWatch, estimatedTotal, overall, current, 1, steps.Length, delegate()
+                RunPipelineStep(steps[1], log, logPath, statePath, timer, totalWatch, estimatedTotal, overall, current, 1, steps.Length, selectedStartStepIndex, delegate()
                 {
                     RunPowerShellScript(ffmpegScript, log, logPath, timer, totalWatch, estimatedTotal, current, fragmentProgress, complex.Count);
                 });
                 SetFragmentProgress(fragmentProgress, totalFragments);
-                RunPipelineStep(steps[2], log, logPath, statePath, timer, totalWatch, estimatedTotal, overall, current, 2, steps.Length, delegate()
+                RunPipelineStep(steps[2], log, logPath, statePath, timer, totalWatch, estimatedTotal, overall, current, 2, steps.Length, selectedStartStepIndex, delegate()
                 {
-                    RunPowerShellScript(assembleScript, log, logPath, timer, totalWatch, estimatedTotal, current);
+                    RetryInAnotherFolder(form, "Assemble video", videoOnlyFile, log, logPath, delegate(string target)
+                    {
+                        string temporaryScript = Path.Combine(Path.GetTempPath(), "vegas-hybrid-" + Guid.NewGuid().ToString("N") + ".ps1");
+                        try
+                        {
+                            WriteAssembleScript(temporaryScript, simple, complex, fps, outDir, target);
+                            RunPowerShellScript(temporaryScript, log, logPath, timer, totalWatch, estimatedTotal, current);
+                        }
+                        finally
+                        {
+                            DeleteRetryMetadata(temporaryScript);
+                            DeleteRetryMetadata(Path.ChangeExtension(temporaryScript, ".ffconcat"));
+                        }
+                        if (!VideoMediaReady(target, expectedDurationSeconds, fps))
+                            throw new ApplicationException("The assembled video did not pass validation: " + target);
+                        if (!String.Equals(target, videoOnlyFile, StringComparison.OrdinalIgnoreCase))
+                        {
+                            videoOnlyFile = target;
+                            TryWriteText(redirectState, target, false);
+                        }
+                    });
+                    CleanupVideoFragmentFiles(simple, complex, outDir, log, logPath);
+                    if (File.Exists(videoOnlyFile) && !String.Equals(videoOnlyFile, Path.Combine(outDir, "hybrid_video_only.mp4"), StringComparison.OrdinalIgnoreCase))
+                        TryWriteText(redirectState, videoOnlyFile, false);
                 });
-                CleanupVideoFragmentFiles(simple, complex, outDir, log, logPath);
-                RunPipelineStep(steps[3], log, logPath, statePath, timer, totalWatch, estimatedTotal, overall, current, 3, steps.Length, delegate()
+                RunPipelineStep(steps[3], log, logPath, statePath, timer, totalWatch, estimatedTotal, overall, current, 3, steps.Length, selectedStartStepIndex, delegate()
                 {
                     RenderAudioFromVegasWithTemplate(vegas, startFrame, endFrame, audioFile, run.AudioTemplate, log, logPath, current, fps);
                 });
-                RunPipelineStep(steps[4], log, logPath, statePath, timer, totalWatch, estimatedTotal, overall, current, 4, steps.Length, delegate()
+                RunPipelineStep(steps[4], log, logPath, statePath, timer, totalWatch, estimatedTotal, overall, current, 4, steps.Length, selectedStartStepIndex, delegate()
                 {
-                    RunPowerShellScript(muxScript, log, logPath, timer, totalWatch, estimatedTotal, current);
+                    RetryInAnotherFolder(form, "Mux final MP4", finalFile, log, logPath, delegate(string target)
+                    {
+                        string temporaryScript = Path.Combine(Path.GetTempPath(), "vegas-hybrid-" + Guid.NewGuid().ToString("N") + ".ps1");
+                        try
+                        {
+                            WriteMuxScript(temporaryScript, outDir, audioFile, target, expectedDurationSeconds, videoOnlyFile);
+                            RunPowerShellScript(temporaryScript, log, logPath, timer, totalWatch, estimatedTotal, current);
+                        }
+                        finally
+                        {
+                            DeleteRetryMetadata(temporaryScript);
+                        }
+                        finalFile = target;
+                        finalLogPath = Path.Combine(Path.GetDirectoryName(target), Path.GetFileNameWithoutExtension(target) + ".log.txt");
+                    });
                 });
-                RunPipelineStep(steps[5], log, logPath, statePath, timer, totalWatch, estimatedTotal, overall, current, 5, steps.Length, delegate()
+                RunPipelineStep(steps[5], log, logPath, statePath, timer, totalWatch, estimatedTotal, overall, current, 5, steps.Length, selectedStartStepIndex, delegate()
                 {
                     ValidateFinalDuration(finalFile, expectedDurationSeconds, fps, log, logPath);
                 });
 
-                SetStatusDetail(current, "Render finished. Copying final log.");
-                AppendProgress(log, logPath, "Temporary folder kept for inspection: " + outDir);
+                totalWatch.Stop();
+                AppendProgress(log, logPath, "Total active render time: " + FormatDuration(totalWatch.Elapsed));
+                SetStatusDetail(current, "Render finished. Copying final log and deleting temporary folder.");
+                AppendProgress(log, logPath, "Done: " + finalFile);
                 AppendProgress(log, logPath, "Copying final log: " + finalLogPath);
+                AppendProgress(log, logPath, "Deleting temporary folder after successful render: " + outDir);
                 File.Copy(logPath, finalLogPath, true);
+                try
+                {
+                    SafeDeleteRunDirectory(outDir, tempRootDir);
+                    File.AppendAllText(finalLogPath,
+                        "[" + DateTime.Now.ToString("HH:mm:ss", CultureInfo.InvariantCulture) + "] Temporary folder deleted: " + outDir + "\r\n",
+                        Encoding.UTF8);
+                }
+                catch (Exception cleanupEx)
+                {
+                    string cleanupLine = "[" + DateTime.Now.ToString("HH:mm:ss", CultureInfo.InvariantCulture) + "] Could not delete temporary folder: " + cleanupEx.Message + "\r\n";
+                    try
+                    {
+                        File.AppendAllText(finalLogPath, cleanupLine, Encoding.UTF8);
+                    }
+                    catch
+                    {
+                    }
+                    try
+                    {
+                        log.AppendText(cleanupLine);
+                        log.SelectionStart = log.TextLength;
+                        log.ScrollToCaret();
+                    }
+                    catch
+                    {
+                    }
+                }
                 UpdateTimerLabel(timer, totalWatch.Elapsed, estimatedTotal);
                 SetOverallProgress(overall, 100);
-                AppendProgress(log, logPath, "Done: " + finalFile);
-                File.Copy(logPath, finalLogPath, true);
                 success = true;
             }
             catch (Exception ex)
             {
+                totalWatch.Stop();
                 AppendProgress(log, logPath, "ERROR: " + ex.Message);
                 SetStatusDetail(current, "Failed. Temporary folder was kept: " + outDir);
                 RefreshPipelineLine(steps, statePath);
@@ -365,6 +498,7 @@ public class EntryPoint
             }
             finally
             {
+                timerRefresh.Dispose();
                 totalWatch.Stop();
                 close.Enabled = true;
                 if (success)
@@ -387,10 +521,115 @@ public class EntryPoint
         form.ShowDialog();
     }
 
+    private sealed class PipelineElapsed
+    {
+        private readonly string path;
+        private readonly object gate = new object();
+        private readonly Stopwatch watch;
+        private readonly System.Threading.Timer checkpoint;
+        private bool stopped;
+
+        public PipelineElapsed(string path)
+        {
+            this.path = path;
+            long ticks;
+            try
+            {
+                if (File.Exists(path) && Int64.TryParse(File.ReadAllText(path).Trim(), NumberStyles.None,
+                    CultureInfo.InvariantCulture, out ticks) && ticks >= 0)
+                    Previous = TimeSpan.FromTicks(ticks);
+            }
+            catch (IOException) { }
+            catch (UnauthorizedAccessException) { }
+            watch = Stopwatch.StartNew();
+            checkpoint = new System.Threading.Timer(SaveCheckpoint, null, 5000, 5000);
+        }
+
+        public TimeSpan Previous { get; private set; }
+        public TimeSpan Elapsed
+        {
+            get { lock (gate) return Previous + watch.Elapsed; }
+        }
+
+        private void SaveCheckpoint(object unused)
+        {
+            lock (gate)
+            {
+                if (!stopped) SaveLocked();
+            }
+        }
+
+        private void SaveLocked()
+        {
+            string pending = path + ".tmp";
+            try
+            {
+                File.WriteAllText(pending, Elapsed.Ticks.ToString(CultureInfo.InvariantCulture));
+                if (File.Exists(path)) File.Replace(pending, path, null);
+                else File.Move(pending, path);
+            }
+            catch (IOException) { }
+            catch (UnauthorizedAccessException) { }
+        }
+
+        public void Stop()
+        {
+            lock (gate)
+            {
+                if (stopped) return;
+                watch.Stop();
+                stopped = true;
+                checkpoint.Dispose();
+                SaveLocked();
+            }
+        }
+    }
+
+    private void RetryInAnotherFolder(Form owner, string stage, string target, TextBox log, string logPath, Action<string> action)
+    {
+        string originalName = Path.GetFileNameWithoutExtension(target);
+        while (true)
+        {
+            try { action(target); return; }
+            catch (Exception ex)
+            {
+                AppendProgress(log, logPath, stage + " failed at " + target + ": " + ex.Message);
+                DialogResult choice = MessageBox.Show(owner, stage + " failed.\r\n\r\n" + ex.Message +
+                    "\r\n\r\nChoose another folder and retry this stage? Completed inputs will be reused.",
+                    "Hybrid render", MessageBoxButtons.RetryCancel, MessageBoxIcon.Warning);
+                if (choice != DialogResult.Retry) throw;
+                string folder = ChooseWorkDirectory(Path.GetDirectoryName(target));
+                if (String.IsNullOrEmpty(folder)) throw;
+                target = Path.Combine(folder, originalName + ".mp4");
+                for (int i = 2; File.Exists(target); i++)
+                    target = Path.Combine(folder, originalName + "-" + i.ToString(CultureInfo.InvariantCulture) + ".mp4");
+                AppendProgress(log, logPath, "Retrying " + stage + " to: " + target);
+            }
+        }
+    }
+
+    private void DeleteRetryMetadata(string path)
+    {
+        try { File.Delete(path); }
+        catch (IOException) { }
+        catch (UnauthorizedAccessException) { }
+    }
+
+    private void TryWriteText(string path, string value, bool append)
+    {
+        try
+        {
+            if (append) File.AppendAllText(path, value, Encoding.UTF8);
+            else File.WriteAllText(path, value, Encoding.UTF8);
+        }
+        catch (IOException) { }
+        catch (UnauthorizedAccessException) { }
+    }
+
     private void AppendProgress(TextBox log, string logPath, string line)
     {
         string text = "[" + DateTime.Now.ToString("HH:mm:ss", CultureInfo.InvariantCulture) + "] " + line;
-        File.AppendAllText(logPath, text + "\r\n", Encoding.UTF8);
+        TryWriteText(logPath, text + "\r\n", true);
         log.AppendText(text + "\r\n");
         log.SelectionStart = log.TextLength;
         log.ScrollToCaret();
@@ -464,15 +703,15 @@ public class EntryPoint
     }
 
     private PipelineStep[] BuildPipelineSteps(string outDir, List<Range> complex, List<SimpleSegment> simple,
-        string videoOnlyFile, string audioFile, string finalFile, double fps, double expectedDurationSeconds)
+        Func<string> videoOnlyFile, string audioFile, Func<string> finalFile, double fps, double expectedDurationSeconds)
     {
         return new PipelineStep[]
         {
-            new PipelineStep("VEGAS", "Complex ranges", delegate() { return MediaDurationReady(videoOnlyFile, expectedDurationSeconds, fps) || VegasPartsComplete(outDir, complex, fps); }),
-            new PipelineStep("FFmpeg", "Simple ranges", delegate() { return MediaDurationReady(videoOnlyFile, expectedDurationSeconds, fps) || SimplePartsComplete(simple, fps); }),
-            new PipelineStep("Video", "Concat copy", delegate() { return MediaDurationReady(videoOnlyFile, expectedDurationSeconds, fps); }),
+            new PipelineStep("VEGAS", "Complex ranges", delegate() { return VideoMediaReady(videoOnlyFile(), expectedDurationSeconds, fps) || VegasPartsComplete(outDir, complex, fps); }),
+            new PipelineStep("FFmpeg", "Simple ranges", delegate() { return VideoMediaReady(videoOnlyFile(), expectedDurationSeconds, fps) || SimplePartsComplete(simple, fps); }),
+            new PipelineStep("Video", "Concat copy", delegate() { return VideoMediaReady(videoOnlyFile(), expectedDurationSeconds, fps); }),
             new PipelineStep("Audio", "WAV stem", delegate() { return MediaDurationReady(audioFile, expectedDurationSeconds, fps); }),
-            new PipelineStep("Final", "MP4 mux", delegate() { return MediaDurationReady(finalFile, expectedDurationSeconds, fps); }),
+            new PipelineStep("Final", "MP4 mux", delegate() { return MediaDurationReady(finalFile(), expectedDurationSeconds, fps); }),
             new PipelineStep("Check", "Duration", delegate() { return false; }, true)
         };
     }
@@ -553,10 +792,48 @@ public class EntryPoint
         }
     }
 
-    private void RunPipelineStep(PipelineStep step, TextBox log, string logPath, string statePath, Label timer,
-        Stopwatch totalWatch, double estimatedTotal, ProgressBar overall, Label current, int stepIndex, int stepCount, StepAction action)
+    private string PipelineStageName(int stepIndex)
     {
-        if (!step.AlwaysRun && step.IsComplete())
+        if (stepIndex == 0)
+            return "1. VEGAS complex ranges";
+        if (stepIndex == 1)
+            return "2. FFmpeg simple ranges";
+        if (stepIndex == 2)
+            return "3. Assemble video";
+        if (stepIndex == 3)
+            return "4. Render audio WAV";
+        if (stepIndex == 4)
+            return "5. Mux final MP4";
+        if (stepIndex == 5)
+            return "6. Validate final MP4";
+        return "Auto / continue from detected outputs";
+    }
+
+    private void RunPipelineStep(PipelineStep step, TextBox log, string logPath, string statePath, Label timer,
+        PipelineElapsed totalWatch, double estimatedTotal, ProgressBar overall, Label current, int stepIndex, int stepCount, int selectedStartStepIndex, StepAction action)
+    {
+        if (selectedStartStepIndex >= 0 && stepIndex < selectedStartStepIndex)
+        {
+            if (!step.AlwaysRun && step.IsComplete())
+            {
+                step.Status = StepStatus.Done;
+                ApplyStepStatus(step);
+                SetOverallProgress(overall, ProgressAfterStep(stepIndex, stepCount));
+                SetStatusDetail(current, "Reuse " + step.Name + ": existing output passed checks.");
+                AppendProgress(log, logPath, "Reuse " + step.Name + ": existing output passed checks.");
+                WriteSingleStepState(statePath, step);
+                return;
+            }
+
+            step.Status = StepStatus.Failed;
+            ApplyStepStatus(step);
+            WriteSingleStepState(statePath, step);
+            throw new ApplicationException("Cannot start at " + PipelineStageName(selectedStartStepIndex) +
+                " because a previous stage is not ready: " + step.Name + " (" + step.Detail + ").");
+        }
+
+        bool forceRun = selectedStartStepIndex >= 0 && stepIndex >= selectedStartStepIndex && !step.AlwaysRun;
+        if (!forceRun && !step.AlwaysRun && step.IsComplete())
         {
             step.Status = StepStatus.Done;
             ApplyStepStatus(step);
@@ -573,7 +850,10 @@ public class EntryPoint
         SetOverallProgress(overall, ProgressBeforeStep(stepIndex, stepCount));
         SetStatusDetail(current, "Step " + (stepIndex + 1).ToString(CultureInfo.InvariantCulture) + "/" +
             stepCount.ToString(CultureInfo.InvariantCulture) + " - " + step.Name + ": " + step.Detail);
-        AppendProgress(log, logPath, "Start " + step.Name + ": " + step.Detail);
+        if (forceRun)
+            AppendProgress(log, logPath, "Start " + step.Name + ": " + step.Detail + " (selected restart)");
+        else
+            AppendProgress(log, logPath, "Start " + step.Name + ": " + step.Detail);
         UpdateTimerLabel(timer, totalWatch.Elapsed, estimatedTotal);
 
         Stopwatch stepWatch = Stopwatch.StartNew();
@@ -619,10 +899,8 @@ public class EntryPoint
 
     private void WriteSingleStepState(string statePath, PipelineStep step)
     {
-        File.AppendAllText(statePath,
-            DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss", CultureInfo.InvariantCulture) + " " +
-            step.Name + "=" + step.Status.ToString() + "\r\n",
-            Encoding.UTF8);
+        TryWriteText(statePath, DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss", CultureInfo.InvariantCulture) +
+            " " + step.Name + "=" + step.Status.ToString() + "\r\n", true);
     }
 
     private bool VegasPartsComplete(string outDir, List<Range> ranges, double fps)
@@ -635,7 +913,7 @@ public class EntryPoint
             Range range = ranges[i];
             string file = Path.Combine(vegasDir, String.Format(CultureInfo.InvariantCulture,
                 "vegas_{0:000}_{1}_{2}.mp4", i, range.Start, range.End));
-            if (!MediaDurationReady(file, ((double)(range.End - range.Start)) / fps, fps))
+            if (!VideoMediaReady(file, ((double)(range.End - range.Start)) / fps, fps))
                 return false;
         }
         return true;
@@ -646,7 +924,7 @@ public class EntryPoint
         for (int i = 0; i < simple.Count; i++)
         {
             double expectedSeconds = ((double)(simple[i].TimelineEnd - simple[i].TimelineStart)) / fps;
-            if (!MediaDurationReady(simple[i].OutFile, expectedSeconds, fps))
+            if (!VideoMediaReady(simple[i].OutFile, expectedSeconds, fps))
                 return false;
         }
         return true;
@@ -734,6 +1012,11 @@ public class EntryPoint
         return Math.Abs(actualSeconds - expectedSeconds) <= DurationToleranceSeconds(fps);
     }
 
+    private bool VideoMediaReady(string path, double expectedSeconds, double fps)
+    {
+        return MediaDurationReady(path, expectedSeconds, fps) && HasVideoStream(path);
+    }
+
     private bool TryProbeDurationSeconds(string path, out double durationSeconds)
     {
         durationSeconds = 0.0;
@@ -748,12 +1031,55 @@ public class EntryPoint
         }
     }
 
-    private void RunPowerShellScript(string scriptPath, TextBox log, string logPath, Label timer, Stopwatch totalWatch, double estimatedTotal, Label current)
+    private bool HasVideoStream(string path)
+    {
+        if (!File.Exists(path))
+            return false;
+
+        ProcessStartInfo info = new ProcessStartInfo();
+        info.FileName = "ffprobe";
+        info.Arguments = "-v error -select_streams v:0 -show_entries stream=codec_type -of default=noprint_wrappers=1:nokey=1 " + CmdQuote(path);
+        info.UseShellExecute = false;
+        info.RedirectStandardOutput = true;
+        info.RedirectStandardError = true;
+        info.CreateNoWindow = true;
+
+        using (Process process = new Process())
+        {
+            process.StartInfo = info;
+            try
+            {
+                process.Start();
+            }
+            catch
+            {
+                return false;
+            }
+
+            string output = process.StandardOutput.ReadToEnd();
+            process.StandardError.ReadToEnd();
+            process.WaitForExit();
+
+            if (process.ExitCode != 0)
+                return false;
+
+            string[] lines = output.Split(new char[] { '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries);
+            for (int i = 0; i < lines.Length; i++)
+            {
+                if (String.Equals(lines[i].Trim(), "video", StringComparison.OrdinalIgnoreCase))
+                    return true;
+            }
+        }
+
+        return false;
+    }
+
+    private void RunPowerShellScript(string scriptPath, TextBox log, string logPath, Label timer, PipelineElapsed totalWatch, double estimatedTotal, Label current)
     {
         RunPowerShellScript(scriptPath, log, logPath, timer, totalWatch, estimatedTotal, current, null, 0);
     }
 
-    private void RunPowerShellScript(string scriptPath, TextBox log, string logPath, Label timer, Stopwatch totalWatch, double estimatedTotal, Label current,
+    private void RunPowerShellScript(string scriptPath, TextBox log, string logPath, Label timer, PipelineElapsed totalWatch, double estimatedTotal, Label current,
         FragmentProgress fragmentProgress, int completedBeforeScript)
     {
         if (!File.Exists(scriptPath))
@@ -782,7 +1108,7 @@ public class EntryPoint
                     return;
                 lock (logLock)
                 {
-                    File.AppendAllText(logPath, e.Data + "\r\n", Encoding.UTF8);
+                    TryWriteText(logPath, e.Data + "\r\n", true);
                 }
                 AppendProcessLine(log, current, e.Data);
                 UpdateFragmentProgressFromProcessLine(fragmentProgress, completedBeforeScript, e.Data);
@@ -912,7 +1238,7 @@ public class EntryPoint
     private string FormatDuration(TimeSpan value)
     {
         if (value.TotalHours >= 1.0)
-            return value.ToString(@"h\:mm\:ss", CultureInfo.InvariantCulture);
+            return ((long)value.TotalHours).ToString(CultureInfo.InvariantCulture) + value.ToString(@"\:mm\:ss", CultureInfo.InvariantCulture);
         return value.ToString(@"mm\:ss", CultureInfo.InvariantCulture);
     }
 
@@ -988,13 +1314,42 @@ public class EntryPoint
         {
             if (renderer == null || !renderer.IsActive)
                 continue;
+            if (!RendererSupportsVideo(renderer))
+                continue;
             foreach (RenderTemplate template in renderer.Templates)
             {
+                RenderChoice choice = new RenderChoice(renderer, template);
                 if (template != null && template.IsValid())
-                    choices.Add(new RenderChoice(renderer, template));
+                    choices.Add(choice);
             }
         }
         return choices;
+    }
+
+    private bool RendererSupportsVideo(Renderer renderer)
+    {
+        try
+        {
+            object value = renderer.GetType().GetProperty("SupportsVideo").GetValue(renderer, null);
+            if (value is bool)
+                return (bool)value;
+        }
+        catch
+        {
+        }
+
+        string extension = renderer.FileExtension == null ? "" : renderer.FileExtension.ToLowerInvariant();
+        string text = (renderer.Name + " " + renderer.FileTypeName + " " + extension).ToLowerInvariant();
+        if (extension == "wav" || extension == "w64" || extension == "mp3" || extension == "aac" || extension == "flac" || extension == "ogg")
+            return false;
+        return text.IndexOf("video") >= 0 ||
+            text.IndexOf("avc") >= 0 ||
+            text.IndexOf("hevc") >= 0 ||
+            text.IndexOf("xavc") >= 0 ||
+            extension == "mp4" ||
+            extension == "mov" ||
+            extension == "mxf" ||
+            extension == "avi";
     }
 
     private List<RenderChoice> BuildAudioRenderChoices(Vegas vegas)
@@ -1155,7 +1510,9 @@ public class EntryPoint
 
         for (int i = 0; i < combo.Items.Count; i++)
         {
-            if (String.Equals(combo.Items[i].ToString(), key, StringComparison.Ordinal))
+            RenderChoice choice = (RenderChoice)combo.Items[i];
+            if (String.Equals(choice.PersistentKey(), key, StringComparison.Ordinal) ||
+                String.Equals(choice.ToString(), key, StringComparison.Ordinal))
             {
                 combo.SelectedIndex = i;
                 return true;
@@ -1164,19 +1521,70 @@ public class EntryPoint
         return false;
     }
 
-    private string LoadLastOutputDirectory(string settingsPath, string fallback)
+    private string GetUserSettingsPath(string projectBase)
     {
-        string saved = LoadSettingValue(settingsPath, "OutputDirectory");
+        string root = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "VegasFfmpegHybridRender");
+        return Path.Combine(root, MakeSafeFileName(projectBase) + "-settings.txt");
+    }
+
+    private string MakeSafeFileName(string value)
+    {
+        if (String.IsNullOrEmpty(value))
+            return "project";
+
+        char[] invalid = Path.GetInvalidFileNameChars();
+        StringBuilder result = new StringBuilder(value.Length);
+        for (int i = 0; i < value.Length; i++)
+        {
+            char ch = value[i];
+            bool isInvalid = false;
+            for (int j = 0; j < invalid.Length; j++)
+            {
+                if (ch == invalid[j])
+                {
+                    isInvalid = true;
+                    break;
+                }
+            }
+            result.Append(isInvalid ? '_' : ch);
+        }
+        return result.Length == 0 ? "project" : result.ToString();
+    }
+
+    private string LoadLastOutputDirectory(string projectSettingsPath, string userSettingsPath, string fallback)
+    {
+        string saved = LoadSettingValue(projectSettingsPath, userSettingsPath, "OutputDirectory");
         if (!String.IsNullOrEmpty(saved))
             return saved;
         return Directory.Exists(fallback) ? fallback : Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments);
+    }
+
+    private string LoadLastTempDirectory(string projectSettingsPath, string userSettingsPath, string fallback)
+    {
+        string saved = LoadSettingValue(projectSettingsPath, userSettingsPath, "TempDirectory");
+        if (!String.IsNullOrEmpty(saved))
+            return saved;
+
+        saved = LoadSettingValue(projectSettingsPath, userSettingsPath, "OutputDirectory");
+        if (!String.IsNullOrEmpty(saved))
+            return saved;
+
+        return Directory.Exists(fallback) ? fallback : Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments);
+    }
+
+    private string LoadSettingValue(string projectSettingsPath, string userSettingsPath, string key)
+    {
+        string value = LoadSettingValue(projectSettingsPath, key);
+        if (!String.IsNullOrEmpty(value))
+            return value;
+        return LoadSettingValue(userSettingsPath, key);
     }
 
     private string LoadSettingValue(string settingsPath, string key)
     {
         try
         {
-            if (!File.Exists(settingsPath))
+            if (String.IsNullOrEmpty(settingsPath) || !File.Exists(settingsPath))
                 return "";
 
             string prefix = key + "=";
@@ -1193,13 +1601,30 @@ public class EntryPoint
         return "";
     }
 
-    private void SaveSettings(string settingsPath, string outputDirectory, string videoTemplateKey, string audioTemplateKey)
+    private void SaveSettings(string projectSettingsPath, string userSettingsPath, string tempDirectory, string outputDirectory, string videoTemplateKey, string audioTemplateKey)
     {
-        using (StreamWriter writer = new StreamWriter(settingsPath, false, Encoding.UTF8))
+        SaveSettingsFile(projectSettingsPath, tempDirectory, outputDirectory, videoTemplateKey, audioTemplateKey);
+        SaveSettingsFile(userSettingsPath, tempDirectory, outputDirectory, videoTemplateKey, audioTemplateKey);
+    }
+
+    private void SaveSettingsFile(string settingsPath, string tempDirectory, string outputDirectory, string videoTemplateKey, string audioTemplateKey)
+    {
+        try
         {
-            writer.WriteLine("OutputDirectory=" + outputDirectory);
-            writer.WriteLine("VideoTemplate=" + videoTemplateKey);
-            writer.WriteLine("AudioTemplate=" + audioTemplateKey);
+            string dir = Path.GetDirectoryName(settingsPath);
+            if (!String.IsNullOrEmpty(dir))
+                Directory.CreateDirectory(dir);
+
+            using (StreamWriter writer = new StreamWriter(settingsPath, false, Encoding.UTF8))
+            {
+                writer.WriteLine("TempDirectory=" + tempDirectory);
+                writer.WriteLine("OutputDirectory=" + outputDirectory);
+                writer.WriteLine("VideoTemplate=" + videoTemplateKey);
+                writer.WriteLine("AudioTemplate=" + audioTemplateKey);
+            }
+        }
+        catch
+        {
         }
     }
 
@@ -1302,6 +1727,9 @@ public class EntryPoint
 
                 if (!FileReady(outputFile))
                     throw new ApplicationException("VEGAS render reported complete but output is missing or empty:\r\n" + outputFile);
+                if (!HasVideoStream(outputFile))
+                    throw new ApplicationException("VEGAS render output contains no video stream. Choose a real video render template, not an audio-only template.\r\n\r\nTemplate: " +
+                        template.Name + "\r\nFile: " + outputFile);
 
                 double actualSeconds;
                 if (TryProbeDurationSeconds(outputFile, out actualSeconds))
@@ -2420,11 +2848,11 @@ public class EntryPoint
         }
     }
 
-    private void WriteAssembleScript(string path, List<SimpleSegment> simple, List<Range> complex, double fps, string outDir)
+    private void WriteAssembleScript(string path, List<SimpleSegment> simple, List<Range> complex, double fps, string outDir, string target = null)
     {
         string vegasDir = Path.Combine(outDir, "vegas-parts");
-        string listPath = Path.Combine(outDir, "parts-video-only.ffconcat");
-        string outFile = Path.Combine(outDir, "hybrid_video_only.mp4");
+        string listPath = target == null ? Path.Combine(outDir, "parts-video-only.ffconcat") : Path.ChangeExtension(path, ".ffconcat");
+        string outFile = target ?? Path.Combine(outDir, "hybrid_video_only.mp4");
 
         List<PartInfo> parts = BuildOrderedParts(simple, complex, vegasDir);
         using (StreamWriter writer = new StreamWriter(path, false, Encoding.UTF8))
@@ -2434,8 +2862,14 @@ public class EntryPoint
             writer.WriteLine("# Low-load final assembly. This should copy video streams instead of re-rendering.");
             writer.WriteLine("$list = " + PsQuote(listPath));
             writer.WriteLine("$out = " + PsQuote(outFile));
+            writer.WriteLine("function Test-VideoStream([string]$path) {");
+            writer.WriteLine("    $probe = & ffprobe -v error -select_streams v:0 -show_entries stream=codec_type -of default=noprint_wrappers=1:nokey=1 $path 2>&1");
+            writer.WriteLine("    if ($LASTEXITCODE -ne 0) { throw \"ffprobe failed for video part: $path`r`n$probe\" }");
+            writer.WriteLine("    return ($probe -match '^video$')");
+            writer.WriteLine("}");
             writer.WriteLine("Write-Host " + PsQuote("Assembling video-only file from " + parts.Count.ToString(CultureInfo.InvariantCulture) + " part(s)."));
             writer.WriteLine("$lines = @('ffconcat version 1.0')");
+            writer.WriteLine("[Int64]$sourceBytes = 0");
             for (int i = 0; i < parts.Count; i++)
             {
                 PartInfo part = parts[i];
@@ -2445,21 +2879,35 @@ public class EntryPoint
                     part.End.ToString(CultureInfo.InvariantCulture) + " -> " + part.FilePath));
                 writer.WriteLine("if (-not (Test-Path -LiteralPath " + PsQuote(part.FilePath) + ")) { throw " +
                     PsQuote("Missing video part: " + part.FilePath) + " }");
+                writer.WriteLine("if (-not (Test-VideoStream " + PsQuote(part.FilePath) + ")) { throw " +
+                    PsQuote("Video part has no video stream: " + part.FilePath) + " }");
+                writer.WriteLine("$sourceBytes += (Get-Item -LiteralPath " + PsQuote(part.FilePath) + ").Length");
                 writer.WriteLine("$lines += \"file '" + EscapeFfconcat(part.FilePath) + "'\"");
             }
+            writer.WriteLine("$drive = [System.IO.DriveInfo]::new([System.IO.Path]::GetPathRoot($out))");
+            writer.WriteLine("$required = [Int64]($sourceBytes + [Math]::Max([double]256MB, [Math]::Ceiling($sourceBytes * 0.01)))");
+            writer.WriteLine("$free = $drive.AvailableFreeSpace");
+            writer.WriteLine("Write-Host ('Assembly space on {0}: {1:N2} GiB free, {2:N2} GiB required.' -f $drive.Name, ($free / 1GB), ($required / 1GB))");
+            writer.WriteLine("if ($free -lt $required) { throw ('Not enough disk space on {0} for video assembly: {1:N2} GiB free, {2:N2} GiB required. Free space or select another temporary folder.' -f $drive.Name, ($free / 1GB), ($required / 1GB)) }");
             writer.WriteLine("[System.IO.File]::WriteAllLines($list, $lines, [System.Text.UTF8Encoding]::new($false))");
-            writer.WriteLine("# No +faststart for the intermediate video-only file: avoids a full-file moov relocation pass.");
-            writer.WriteLine("ffmpeg -y -hide_banner -f concat -safe 0 -i $list -map 0:v:0 -an -c:v copy $out");
-            writer.WriteLine("if ($LASTEXITCODE -ne 0) { throw \"ffmpeg stream-copy assembly failed with exit code $LASTEXITCODE\" }");
-            writer.WriteLine("if (-not (Test-Path -LiteralPath $out)) { throw \"Missing assembled video output: $out\" }");
+            writer.WriteLine("$pending = $out + '.' + [Guid]::NewGuid().ToString('N') + '.assembling.mp4'");
+            writer.WriteLine("try {");
+            writer.WriteLine("    ffmpeg -n -nostdin -hide_banner -f concat -safe 0 -i $list -map 0:v:0 -an -c:v copy $pending");
+            writer.WriteLine("    if ($LASTEXITCODE -ne 0) { throw \"ffmpeg stream-copy assembly failed with exit code $LASTEXITCODE\" }");
+            writer.WriteLine("    if (-not (Test-VideoStream $pending)) { throw 'Assembled output has no video stream.' }");
+            writer.WriteLine("    if (Test-Path -LiteralPath $out) { [System.IO.File]::Replace($pending, $out, [NullString]::Value) }");
+            writer.WriteLine("    else { [System.IO.File]::Move($pending, $out) }");
+            writer.WriteLine("} finally {");
+            writer.WriteLine("    if (Test-Path -LiteralPath $pending) { Remove-Item -LiteralPath $pending -Force -ErrorAction SilentlyContinue }");
+            writer.WriteLine("}");
             writer.WriteLine("Write-Host (\"Video-only output size: {0:n0} bytes\" -f (Get-Item -LiteralPath $out).Length)");
             writer.WriteLine("Write-Host " + PsQuote("Video-only output ready: ") + " $out");
         }
     }
 
-    private void WriteMuxScript(string path, string outDir, string audioFile, string finalFile, double expectedDurationSeconds)
+    private void WriteMuxScript(string path, string outDir, string audioFile, string finalFile, double expectedDurationSeconds, string videoTarget = null)
     {
-        string videoFile = Path.Combine(outDir, "hybrid_video_only.mp4");
+        string videoFile = videoTarget ?? Path.Combine(outDir, "hybrid_video_only.mp4");
 
         using (StreamWriter writer = new StreamWriter(path, false, Encoding.UTF8))
         {
@@ -2468,15 +2916,49 @@ public class EntryPoint
             writer.WriteLine("$video = " + PsQuote(videoFile));
             writer.WriteLine("$audio = " + PsQuote(audioFile));
             writer.WriteLine("$out = " + PsQuote(finalFile));
+            writer.WriteLine("$tmp = $out + '.' + [Guid]::NewGuid().ToString('N') + '.muxing.mp4'");
+            writer.WriteLine("$expectedSeconds = " + Num(expectedDurationSeconds));
+            writer.WriteLine("function Format-Bytes([Int64]$bytes) {");
+            writer.WriteLine("    if ($bytes -ge 1GB) { return (\"{0:n2} GB\" -f ($bytes / 1GB)) }");
+            writer.WriteLine("    if ($bytes -ge 1MB) { return (\"{0:n2} MB\" -f ($bytes / 1MB)) }");
+            writer.WriteLine("    return (\"{0:n0} bytes\" -f $bytes)");
+            writer.WriteLine("}");
             writer.WriteLine("if (-not (Test-Path -LiteralPath $video)) { throw \"Missing assembled video: $video\" }");
             writer.WriteLine("if (-not (Test-Path -LiteralPath $audio)) { throw \"Missing VEGAS audio WAV: $audio\" }");
             writer.WriteLine("Write-Host " + PsQuote("Muxing final MP4. Expected duration: " + Num(expectedDurationSeconds) + " sec."));
             writer.WriteLine("Write-Host " + PsQuote("  video: " + videoFile));
             writer.WriteLine("Write-Host " + PsQuote("  audio: " + audioFile));
             writer.WriteLine("Write-Host " + PsQuote("  output: " + finalFile));
+            writer.WriteLine("$videoInfo = Get-Item -LiteralPath $video");
+            writer.WriteLine("$audioInfo = Get-Item -LiteralPath $audio");
+            writer.WriteLine("Write-Host (\"  video size: {0}\" -f (Format-Bytes $videoInfo.Length))");
+            writer.WriteLine("Write-Host (\"  audio size: {0}\" -f (Format-Bytes $audioInfo.Length))");
+            writer.WriteLine("$spaceCheckFailed = $false");
+            writer.WriteLine("try {");
+            writer.WriteLine("    $driveRoot = [System.IO.Path]::GetPathRoot($out)");
+            writer.WriteLine("    $drive = New-Object System.IO.DriveInfo -ArgumentList $driveRoot");
+            writer.WriteLine("    $estimatedAudioBytes = [Int64][Math]::Ceiling($expectedSeconds * 24000.0)");
+            writer.WriteLine("    $requiredBytes = [Int64]($videoInfo.Length + $estimatedAudioBytes + 536870912)");
+            writer.WriteLine("    Write-Host (\"  free space: {0}\" -f (Format-Bytes $drive.AvailableFreeSpace))");
+            writer.WriteLine("    Write-Host (\"  required approx: {0}\" -f (Format-Bytes $requiredBytes))");
+            writer.WriteLine("    if ($drive.AvailableFreeSpace -lt $requiredBytes) {");
+            writer.WriteLine("        $spaceCheckFailed = $true");
+            writer.WriteLine("        throw (\"Not enough free space for final mux. Free {0}, need approximately {1}.\" -f (Format-Bytes $drive.AvailableFreeSpace), (Format-Bytes $requiredBytes))");
+            writer.WriteLine("    }");
+            writer.WriteLine("} catch {");
+            writer.WriteLine("    if ($spaceCheckFailed) { throw }");
+            writer.WriteLine("    Write-Host (\"  free space check unavailable: {0}\" -f $_.Exception.Message)");
+            writer.WriteLine("}");
             writer.WriteLine("# No +faststart by default: local final files do not need the extra full-file rewrite.");
-            writer.WriteLine("ffmpeg -y -hide_banner -i $video -i $audio -map 0:v:0 -map 1:a:0 -c:v copy -c:a aac -b:a 192k -shortest $out");
-            writer.WriteLine("if ($LASTEXITCODE -ne 0) { throw \"ffmpeg final mux failed with exit code $LASTEXITCODE\" }");
+            writer.WriteLine("try {");
+            writer.WriteLine("    ffmpeg -n -nostdin -hide_banner -i $video -i $audio -map 0:v:0 -map 1:a:0 -c:v copy -c:a aac -b:a 192k -shortest $tmp");
+            writer.WriteLine("    if ($LASTEXITCODE -ne 0) { throw \"ffmpeg final mux failed with exit code $LASTEXITCODE\" }");
+            writer.WriteLine("    if (-not (Test-Path -LiteralPath $tmp)) { throw \"Missing temporary final MP4 output: $tmp\" }");
+            writer.WriteLine("    if (Test-Path -LiteralPath $out) { [System.IO.File]::Replace($tmp, $out, [NullString]::Value) }");
+            writer.WriteLine("    else { [System.IO.File]::Move($tmp, $out) }");
+            writer.WriteLine("} finally {");
+            writer.WriteLine("    if (Test-Path -LiteralPath $tmp) { Remove-Item -LiteralPath $tmp -Force -ErrorAction SilentlyContinue }");
+            writer.WriteLine("}");
             writer.WriteLine("if (-not (Test-Path -LiteralPath $out)) { throw \"Missing final MP4 output: $out\" }");
             writer.WriteLine("Write-Host (\"Final output size: {0:n0} bytes\" -f (Get-Item -LiteralPath $out).Length)");
             writer.WriteLine("Write-Host " + PsQuote("Final output ready: ") + " $out");
@@ -2710,7 +3192,10 @@ public class EntryPoint
 
     private string EscapeFfconcat(string value)
     {
-        return value.Replace("\\", "/").Replace("'", "'\\''");
+        // The ffconcat path is embedded in a PowerShell double-quoted string.
+        // Escape PowerShell interpolation after applying ffconcat quoting.
+        return value.Replace("\\", "/").Replace("'", "'\\''")
+            .Replace("`", "``").Replace("$", "`$").Replace("\"", "`\"");
     }
 
     private class VideoEventInfo
@@ -2804,19 +3289,44 @@ public class EntryPoint
 
     private class RunSelection
     {
+        public string TempDirectory;
         public string OutputDirectory;
         public RenderTemplate VideoTemplate;
         public RenderTemplate AudioTemplate;
         public string VideoTemplateKey;
         public string AudioTemplateKey;
+        public string VideoTemplateDisplay;
+        public string AudioTemplateDisplay;
+        public int StartStepIndex;
 
-        public RunSelection(string outputDirectory, RenderChoice videoChoice, RenderChoice audioChoice)
+        public RunSelection(string tempDirectory, string outputDirectory, RenderChoice videoChoice, RenderChoice audioChoice, int startStepIndex)
         {
+            TempDirectory = tempDirectory;
             OutputDirectory = outputDirectory;
             VideoTemplate = videoChoice.Template;
             AudioTemplate = audioChoice.Template;
-            VideoTemplateKey = videoChoice.ToString();
-            AudioTemplateKey = audioChoice.ToString();
+            VideoTemplateKey = videoChoice.PersistentKey();
+            AudioTemplateKey = audioChoice.PersistentKey();
+            VideoTemplateDisplay = videoChoice.ToString();
+            AudioTemplateDisplay = audioChoice.ToString();
+            StartStepIndex = startStepIndex;
+        }
+    }
+
+    private class StageChoice
+    {
+        public int StepIndex;
+        public string Display;
+
+        public StageChoice(int stepIndex, string display)
+        {
+            StepIndex = stepIndex;
+            Display = display;
+        }
+
+        public override string ToString()
+        {
+            return Display;
         }
     }
 
@@ -2868,15 +3378,28 @@ public class EntryPoint
             Template = template;
         }
 
+        public string PersistentKey()
+        {
+            return SafeText(Renderer.Name) +
+                "|" + SafeText(Renderer.FileTypeName) +
+                "|" + SafeText(Renderer.FileExtension) +
+                "|" + SafeText(Template.Name);
+        }
+
         public override string ToString()
         {
-            return Renderer.Name +
-                " | " + Renderer.FileTypeName +
-                " | " + Template.Name +
+            return SafeText(Renderer.Name) +
+                " | " + SafeText(Renderer.FileTypeName) +
+                " | " + SafeText(Template.Name) +
                 " | " + Template.VideoWidth.ToString(CultureInfo.InvariantCulture) + "x" +
                 Template.VideoHeight.ToString(CultureInfo.InvariantCulture) +
                 " | " + Template.VideoFrameRate.ToString("0.###", CultureInfo.InvariantCulture) + " fps" +
-                " | ." + Renderer.FileExtension;
+                " | ." + SafeText(Renderer.FileExtension);
+        }
+
+        private string SafeText(string value)
+        {
+            return value == null ? "" : value;
         }
     }
 }
